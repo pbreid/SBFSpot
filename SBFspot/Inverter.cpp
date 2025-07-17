@@ -880,6 +880,7 @@ void Inverter::processCommands()
         // Process command
         if (cmd.command == "set_power_limit")
         {
+            printf("Setting power limit to %u W for inverter %s\n", cmd.power_limit_watts, cmd.inverter_serial.c_str());
             E_SBFSPOT rc = setPowerLimit(targetInverter, cmd.power_limit_watts);
             if (rc == E_OK)
             {

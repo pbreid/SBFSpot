@@ -123,6 +123,8 @@ struct Config
     std::string mqtt_subscribe_exe; // default /usr/bin/mosquitto_sub
     std::string mqtt_subscribe_args;// default arguments for mosquitto_sub
     bool mqtt_commands_enabled;     // default false
+    uint32_t default_power_limit_4000;  // default power limit for 4000TL-21
+    uint32_t default_power_limit_5000;  // default power limit for 5000TL-21
 
     std::string decode_path;        // undocumented
 
@@ -301,6 +303,9 @@ struct InverterData
     E_SBFSPOT status;                   // Result of getInverterData()
     uint32_t PowerLimit;                // Current power limit in watts
     float PowerLimitPct;                // Current power limit as percentage
+    uint32_t TargetPowerLimit;          // Target power limit set via MQTT
+    time_t PowerLimitLastSet;           // When power limit was last set via MQTT
+    bool PowerLimitSyncNeeded;          // Whether manual sync is needed
 };
 
 //SMA Structs must be aligned on byte boundaries

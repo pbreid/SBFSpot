@@ -244,6 +244,15 @@ int MqttExport::exportInverterData(const std::vector<InverterData>& inverterData
             case "powerlimitpct"_:
                 FormatFloat(value, inv.PowerLimitPct, 0, prec, dp);
                 break;
+            case "targetpowerlimit"_:
+                FormatFloat(value, (float)inv.TargetPowerLimit, 0, prec, dp);
+                break;
+            case "powerlimitsyncneeded"_:
+                snprintf(value, sizeof(value) - 1, "\"%s\"", inv.PowerLimitSyncNeeded ? "true" : "false");
+                break;
+            case "powerlimitlastset"_:
+                snprintf(value, sizeof(value) - 1, "\"%s\"", inv.PowerLimitLastSet > 0 ? strftime_t(m_config.DateTimeFormat, inv.PowerLimitLastSet).c_str() : "never");
+                break;
             case "pdc"_:
                 for (const auto& dc : inv.mpp)
                 {

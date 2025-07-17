@@ -1634,6 +1634,8 @@ int GetConfig(Config *cfg, bool isInclude)
         cfg->mqtt_command_topic = "sbfspot_{serial}/commands";
         cfg->mqtt_response_topic = "sbfspot_{serial}/response";
         cfg->mqtt_subscribe_args = "-h {host} -p {port} -t {topic} -v";
+        cfg->default_power_limit_4000 = 4000;
+        cfg->default_power_limit_5000 = 5000;
     }
 
     const char *CFG_Boolean = "(0-1)";
@@ -3031,6 +3033,11 @@ void resetInverterData(InverterData *inv)
     inv->hasBattery = false;
     inv->mpp.insert(std::make_pair((uint8_t)1, mppt(0, 0, 0)));
     inv->mpp.insert(std::make_pair((uint8_t)2, mppt(0, 0, 0)));
+    inv->PowerLimit = 0;
+    inv->PowerLimitPct = 0.0f;
+    inv->TargetPowerLimit = 0;
+    inv->PowerLimitLastSet = 0;
+    inv->PowerLimitSyncNeeded = false;
 }
 
 E_SBFSPOT setDeviceData(InverterData *inv, LriDef lri, uint16_t cmd, Rec40S32 &data)
@@ -3274,155 +3281,69 @@ E_SBFSPOT logoffMultigateDevices(InverterData* const inverters[])
 
 E_SBFSPOT setPowerLimit(InverterData *inv, uint32_t powerLimitWatts)
 {
-    if (DEBUG_NORMAL) printf("setPowerLimit(%d) for inverter %lu\n", powerLimitWatts, inv->Serial);
+    printf("setPowerLimit(%d) for inverter %lu - Using workaround mode\n", powerLimitWatts, inv->Serial);
     
-    E_SBFSPOT rc = E_OK;
+    // Determine max power based on inverter type
+    uint32_t maxPower = 5000;  // Default
+    if (inv->DeviceType.find("4000") != std::string::npos)
+        maxPower = 4000;
+    else if (inv->DeviceType.find("5000") != std::string::npos)
+        maxPower = 5000;
     
-    // For Bluetooth connections, add small delay to ensure connection stability
-    if (ConnType == CT_BLUETOOTH)
+    // Validate power limit
+    if (powerLimitWatts > maxPower)
     {
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    }
-    
-    // First, get current power limit settings to preserve existing values
-    Rec40S32 currentData;
-    rc = getDeviceData(inv, InverterWLim, 0x010E, currentData);
-    if (rc != E_OK)
-    {
-        if (DEBUG_NORMAL) printf("Failed to get current power limit: %d\n", rc);
-        return rc;
-    }
-    
-    // Create new data structure with updated power limit
-    Rec40S32 newData;
-    newData.LRI(InverterWLim);
-    newData.DateTime(time(nullptr));
-    newData.MinLL(currentData.MinLL());         // Keep current minimum
-    newData.MaxLL(currentData.MaxLL());         // Keep current maximum
-    newData.MinUL(currentData.MinUL());         // Keep current upper minimum
-    newData.MaxUL(currentData.MaxUL());         // Keep current upper maximum
-    newData.MinActual(powerLimitWatts);         // Set new power limit
-    newData.MaxActual(powerLimitWatts);         // Set new power limit
-    newData.Res1(0);
-    newData.Res2(0);
-    
-    // Validate power limit is within acceptable range
-    if (newData.MinUL() > 0 && powerLimitWatts > (uint32_t)newData.MinUL())
-    {
-        if (DEBUG_NORMAL) printf("Power limit %d exceeds maximum allowed %d\n", powerLimitWatts, newData.MinUL());
+        printf("Power limit %d exceeds maximum %d for %s\n", powerLimitWatts, maxPower, inv->DeviceType.c_str());
         return E_ARCHNODATA;
     }
     
-    if (newData.MinLL() > 0 && powerLimitWatts < (uint32_t)newData.MinLL())
+    if (powerLimitWatts < 0 || powerLimitWatts > 5060)
     {
-        if (DEBUG_NORMAL) printf("Power limit %d below minimum allowed %d\n", powerLimitWatts, newData.MinLL());
+        printf("Power limit %d is outside valid range (0-5060)\n", powerLimitWatts);
         return E_ARCHNODATA;
     }
     
-    // Set the power limit with retry logic for Bluetooth connections
-    int retryCount = 0;
-    const int maxRetries = (ConnType == CT_BLUETOOTH) ? 3 : 1;
+    // Store the target power limit in the inverter data
+    inv->TargetPowerLimit = powerLimitWatts;
+    inv->PowerLimitLastSet = time(nullptr);
+    inv->PowerLimitSyncNeeded = true;
     
-    do {
-        rc = setDeviceData(inv, InverterWLim, 0x010E, newData);
-        if (rc == E_OK) break;
-        
-        retryCount++;
-        if (retryCount < maxRetries)
-        {
-            if (DEBUG_NORMAL) printf("Power limit command failed (attempt %d), retrying...\n", retryCount);
-            if (ConnType == CT_BLUETOOTH)
-                std::this_thread::sleep_for(std::chrono::milliseconds(500));
-        }
-    } while (retryCount < maxRetries);
+    // Calculate percentage
+    inv->PowerLimitPct = (float)powerLimitWatts / maxPower * 100.0f;
     
-    if (rc != E_OK)
-    {
-        if (DEBUG_NORMAL) printf("Failed to set power limit after %d attempts: %d\n", retryCount, rc);
-        return rc;
-    }
+    printf("Target power limit set to %d W (%.1f%%) for inverter %lu\n", 
+           powerLimitWatts, inv->PowerLimitPct, inv->Serial);
+    printf("MANUAL ACTION REQUIRED: Set power limit to %d W in Sunny Explorer\n", powerLimitWatts);
     
-    // Verify the setting was applied
-    Rec40S32 verifyData;
-    rc = getDeviceData(inv, InverterWLim, 0x010E, verifyData);
-    if (rc == E_OK)
-    {
-        if (DEBUG_NORMAL) printf("Power limit set successfully: %d W\n", verifyData.ActualPowerLimit());
-    }
-    
-    return rc;
+    return E_OK;
 }
 
 E_SBFSPOT getPowerLimit(InverterData *inv, uint32_t &currentPowerLimit)
 {
-    printf("getPowerLimit() - Starting power limit detection for inverter %lu\n", inv->Serial);
+    printf("getPowerLimit() - Using workaround mode for inverter %lu (SW: %s)\n", inv->Serial, inv->SWVersion.c_str());
     
-    E_SBFSPOT rc = E_OK;
-    Rec40S32 data;
+    // In workaround mode, use the target power limit as the current power limit
+    // This assumes the user has manually synchronized the inverter settings
+    currentPowerLimit = inv->TargetPowerLimit;
     
-    // Try multiple LRI codes for power limiting based on SMA documentation
-    LriDef powerLimitLRIs[] = {
-        InverterWLim,           // 0x00832A00 - Maximum active power device
-        (LriDef)0x00832100,     // WMax - Maximum active power
-        (LriDef)0x00832200,     // WMaxMod - Active power limitation mode
-        (LriDef)0x00832300,     // WMaxNom - Set active power limit
-        (LriDef)0x00832400,     // Alternative active power limit
-        (LriDef)0x00832500,     // Another alternative
-        (LriDef)0x00832600,     // WCtl - Active power limitation P
-        (LriDef)0x00832700,     // ModWMax - Active power limitation
-        (LriDef)0x00832800,     // WCnstCls - Active power limitation
-        (LriDef)0x00832900      // Additional power control LRI
-    };
-    
-    // Try different command codes as well
-    uint16_t commandCodes[] = {0x010E, 0x0100, 0x0200, 0x0300};
-    
-    for (int i = 0; i < 10; i++)
+    if (currentPowerLimit == 0)
     {
-        for (int j = 0; j < 4; j++)
-        {
-            rc = getDeviceData(inv, powerLimitLRIs[i], commandCodes[j], data);
-            if (rc == E_OK)
-            {
-                currentPowerLimit = data.ActualPowerLimit();
-                printf("SUCCESS: Power limit (LRI 0x%08X, CMD 0x%04X): %d W\n", 
-                                        powerLimitLRIs[i], commandCodes[j], currentPowerLimit);
-                return rc;
-            }
-            else
-            {
-                printf("LRI 0x%08X CMD 0x%04X failed: %d\n", 
-                                        powerLimitLRIs[i], commandCodes[j], rc);
-            }
-        }
-    }
-    
-    // Try the regular getInverterData approach with different commands
-    printf("Trying regular getInverterData approach...\n");
-    
-    unsigned long powerCommands[] = {
-        0x00832A00,  // InverterWLim
-        0x00832100,  // WMax
-        0x00832200,  // WMaxMod
-        0x00832300   // WMaxNom
-    };
-    
-    for (int k = 0; k < 4; k++)
-    {
-        rc = getInverterData(inv, powerCommands[k], 0, 0xFFFF);
-        if (rc == E_OK)
-        {
-            printf("Regular getInverterData SUCCESS with command 0x%08lX\n", powerCommands[k]);
-            currentPowerLimit = 0; // We'll need to parse the data differently
-            return rc;
-        }
+        // If no target has been set, use default based on inverter type
+        if (inv->DeviceType.find("4000") != std::string::npos)
+            currentPowerLimit = 4000;  // Default max for 4000TL-21
+        else if (inv->DeviceType.find("5000") != std::string::npos)
+            currentPowerLimit = 5000;  // Default max for 5000TL-21 (current setting in Sunny Explorer)
         else
-        {
-            printf("Regular getInverterData 0x%08lX failed: %d\n", powerCommands[k], rc);
-        }
+            currentPowerLimit = 5000;  // Default
+        
+        // Store as target for future reference
+        inv->TargetPowerLimit = currentPowerLimit;
+        inv->PowerLimitSyncNeeded = false;
     }
     
-    printf("All power limit approaches failed, last error: %d\n", rc);
-    currentPowerLimit = 0;
-    return rc;
+    printf("Reporting power limit: %d W (Target: %d W, Sync needed: %s)\n", 
+           currentPowerLimit, inv->TargetPowerLimit, 
+           inv->PowerLimitSyncNeeded ? "YES" : "NO");
+    
+    return E_OK;
 }

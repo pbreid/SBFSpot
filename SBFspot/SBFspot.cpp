@@ -3344,7 +3344,7 @@ E_SBFSPOT setPowerLimit(InverterData *inv, uint32_t powerLimitWatts)
 
 E_SBFSPOT getPowerLimit(InverterData *inv, uint32_t &currentPowerLimit)
 {
-    if (DEBUG_NORMAL) printf("getPowerLimit() - Starting power limit detection for inverter %lu\n", inv->Serial);
+    printf("getPowerLimit() - Starting power limit detection for inverter %lu\n", inv->Serial);
     
     E_SBFSPOT rc = E_OK;
     Rec40S32 data;
@@ -3374,20 +3374,20 @@ E_SBFSPOT getPowerLimit(InverterData *inv, uint32_t &currentPowerLimit)
             if (rc == E_OK)
             {
                 currentPowerLimit = data.ActualPowerLimit();
-                if (DEBUG_NORMAL) printf("SUCCESS: Power limit (LRI 0x%08X, CMD 0x%04X): %d W\n", 
+                printf("SUCCESS: Power limit (LRI 0x%08X, CMD 0x%04X): %d W\n", 
                                         powerLimitLRIs[i], commandCodes[j], currentPowerLimit);
                 return rc;
             }
             else
             {
-                if (DEBUG_NORMAL) printf("LRI 0x%08X CMD 0x%04X failed: %d\n", 
+                printf("LRI 0x%08X CMD 0x%04X failed: %d\n", 
                                         powerLimitLRIs[i], commandCodes[j], rc);
             }
         }
     }
     
     // Try the regular getInverterData approach with different commands
-    if (DEBUG_NORMAL) printf("Trying regular getInverterData approach...\n");
+    printf("Trying regular getInverterData approach...\n");
     
     unsigned long powerCommands[] = {
         0x00832A00,  // InverterWLim
@@ -3401,17 +3401,17 @@ E_SBFSPOT getPowerLimit(InverterData *inv, uint32_t &currentPowerLimit)
         rc = getInverterData(inv, powerCommands[k], 0, 0xFFFF);
         if (rc == E_OK)
         {
-            if (DEBUG_NORMAL) printf("Regular getInverterData SUCCESS with command 0x%08lX\n", powerCommands[k]);
+            printf("Regular getInverterData SUCCESS with command 0x%08lX\n", powerCommands[k]);
             currentPowerLimit = 0; // We'll need to parse the data differently
             return rc;
         }
         else
         {
-            if (DEBUG_NORMAL) printf("Regular getInverterData 0x%08lX failed: %d\n", powerCommands[k], rc);
+            printf("Regular getInverterData 0x%08lX failed: %d\n", powerCommands[k], rc);
         }
     }
     
-    if (DEBUG_NORMAL) printf("All power limit approaches failed, last error: %d\n", rc);
+    printf("All power limit approaches failed, last error: %d\n", rc);
     currentPowerLimit = 0;
     return rc;
 }

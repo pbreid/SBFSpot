@@ -1709,13 +1709,23 @@ int GetConfig(Config *cfg, bool isInclude)
                         strncpy(cfg->IP_Address, cfg->ip_addresslist[0].c_str(), sizeof(cfg->IP_Address) - 1);
                     }
                 }
+                else if(stricmp(key, "UserGroup") == 0)
+                {
+                    if (stricmp(value, "USER") == 0)
+                        cfg->userGroup = UG_USER;
+                    else if (stricmp(value, "INSTALLER") == 0)
+                        cfg->userGroup = UG_INSTALLER;
+                    else
+                    {
+                        printf(CFG_InvalidValue, key, "(USER|INSTALLER)");
+                        rc = -2;
+                        break;
+                    }
+                }
                 else if(stricmp(key, "Password") == 0)
                 {
-                    if (cfg->userGroup == UG_USER)
-                    {
-                        memset(cfg->SMA_Password, 0, sizeof(cfg->SMA_Password));
-                        strncpy(cfg->SMA_Password, value, sizeof(cfg->SMA_Password) - 1);
-                    }
+                    memset(cfg->SMA_Password, 0, sizeof(cfg->SMA_Password));
+                    strncpy(cfg->SMA_Password, value, sizeof(cfg->SMA_Password) - 1);
                 }
                 else if (stricmp(key, "OutputPath") == 0)
                 {
@@ -2155,7 +2165,8 @@ void ShowConfig(Config *cfg)
         std::cout << "\nIP_Address=" << iplist.str().substr(1);
     }
     
-    std::cout << "\nPassword=<undisclosed>" << \
+    std::cout << "\nUserGroup=" << (cfg->userGroup == UG_USER ? "USER" : "INSTALLER") << \
+        "\nPassword=<undisclosed>" << \
         "\nPlantname=" << cfg->plantname << \
         "\nOutputPath=" << cfg->outputPath << \
         "\nOutputPathEvents=" << cfg->outputPath_Events << \

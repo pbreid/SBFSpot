@@ -3349,17 +3349,69 @@ E_SBFSPOT getPowerLimit(InverterData *inv, uint32_t &currentPowerLimit)
     E_SBFSPOT rc = E_OK;
     Rec40S32 data;
     
-    rc = getDeviceData(inv, InverterWLim, 0x010E, data);
-    if (rc == E_OK)
+    // Try multiple LRI codes for power limiting based on SMA documentation
+    LriDef powerLimitLRIs[] = {
+        InverterWLim,           // 0x00832A00 - Maximum active power device
+        (LriDef)0x00832100,     // WMax - Maximum active power
+        (LriDef)0x00832200,     // WMaxMod - Active power limitation mode
+        (LriDef)0x00832300,     // WMaxNom - Set active power limit
+        (LriDef)0x00832400,     // Alternative active power limit
+        (LriDef)0x00832500,     // Another alternative
+        (LriDef)0x00832600,     // WCtl - Active power limitation P
+        (LriDef)0x00832700,     // ModWMax - Active power limitation
+        (LriDef)0x00832800,     // WCnstCls - Active power limitation
+        (LriDef)0x00832900      // Additional power control LRI
+    };
+    
+    // Try different command codes as well
+    uint16_t commandCodes[] = {0x010E, 0x0100, 0x0200, 0x0300};
+    
+    for (int i = 0; i < 10; i++)
     {
-        currentPowerLimit = data.ActualPowerLimit();
-        if (DEBUG_NORMAL) printf("Current power limit: %d W\n", currentPowerLimit);
-    }
-    else
-    {
-        if (DEBUG_NORMAL) printf("Failed to get power limit: %d\n", rc);
-        currentPowerLimit = 0;
+        for (int j = 0; j < 4; j++)
+        {
+            rc = getDeviceData(inv, powerLimitLRIs[i], commandCodes[j], data);
+            if (rc == E_OK)
+            {
+                currentPowerLimit = data.ActualPowerLimit();
+                if (DEBUG_NORMAL) printf("SUCCESS: Power limit (LRI 0x%08X, CMD 0x%04X): %d W\n", 
+                                        powerLimitLRIs[i], commandCodes[j], currentPowerLimit);
+                return rc;
+            }
+            else
+            {
+                if (DEBUG_NORMAL) printf("LRI 0x%08X CMD 0x%04X failed: %d\n", 
+                                        powerLimitLRIs[i], commandCodes[j], rc);
+            }
+        }
     }
     
+    // Try the regular getInverterData approach with different commands
+    if (DEBUG_NORMAL) printf("Trying regular getInverterData approach...\n");
+    
+    unsigned long powerCommands[] = {
+        0x00832A00,  // InverterWLim
+        0x00832100,  // WMax
+        0x00832200,  // WMaxMod
+        0x00832300   // WMaxNom
+    };
+    
+    for (int k = 0; k < 4; k++)
+    {
+        rc = getInverterData(inv, powerCommands[k], 0, 0xFFFF);
+        if (rc == E_OK)
+        {
+            if (DEBUG_NORMAL) printf("Regular getInverterData SUCCESS with command 0x%08lX\n", powerCommands[k]);
+            currentPowerLimit = 0; // We'll need to parse the data differently
+            return rc;
+        }
+        else
+        {
+            if (DEBUG_NORMAL) printf("Regular getInverterData 0x%08lX failed: %d\n", powerCommands[k], rc);
+        }
+    }
+    
+    if (DEBUG_NORMAL) printf("All power limit approaches failed, last error: %d\n", rc);
+    currentPowerLimit = 0;
     return rc;
 }

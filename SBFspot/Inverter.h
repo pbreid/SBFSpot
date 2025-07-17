@@ -38,6 +38,7 @@ DISCLAIMER:
 
 struct Config;
 struct InverterData;
+class MqttCommandSubscriber;
 
 class Inverter
 {
@@ -59,6 +60,8 @@ private:
     void disconnect();
 
     void importInverterData();
+    void processCommands();
+    void updatePowerLimitData();
 
     const Config& m_config;
 
@@ -69,5 +72,7 @@ private:
 #if defined(USE_SQLITE) || defined(USE_MYSQL)
     db_SQL_Export m_db;
 #endif
+    
+    MqttCommandSubscriber* m_mqtt_subscriber;
 };
 

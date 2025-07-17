@@ -41,15 +41,27 @@ DISCLAIMER:
 #include "mppt.h"
 
 Inverter::Inverter(const Config& config)
-    : m_config(config)
+    : m_config(config), m_mqtt_subscriber(nullptr)
 {
     //Allocate array to hold InverterData structs
     m_inverters = new InverterData*[MAX_INVERTERS];
     for (uint32_t i=0; i<MAX_INVERTERS; m_inverters[i++]=NULL);
+    
+    // Initialize MQTT command subscriber if enabled
+    if (m_config.mqtt_commands_enabled)
+    {
+        m_mqtt_subscriber = new MqttCommandSubscriber(m_config);
+        m_mqtt_subscriber->start();
+    }
 }
 
 Inverter::~Inverter()
 {
+    if (m_mqtt_subscriber)
+    {
+        m_mqtt_subscriber->stop();
+        delete m_mqtt_subscriber;
+    }
     delete[] m_inverters;
 }
 
@@ -431,6 +443,12 @@ int Inverter::process()
     }
 #endif
 
+    // Update power limit data for all inverters
+    updatePowerLimitData();
+    
+    // Process MQTT commands if enabled
+    processCommands();
+    
     exportSpotData();
 
     //SolarInverter -> Continue to get archive data
@@ -778,5 +796,131 @@ std::vector<InverterData> Inverter::toStdVector(InverterData* const* const inver
         inverterData.push_back(*inverters[inv]);
 
     return inverterData;
+}
+
+void Inverter::updatePowerLimitData()
+{
+    // Update power limit data for all inverters
+    for (uint32_t inv = 0; m_inverters[inv] != NULL && inv < MAX_INVERTERS; inv++)
+    {
+        InverterData* inverter = m_inverters[inv];
+        uint32_t powerLimit = 0;
+        
+        E_SBFSPOT rc = getPowerLimit(inverter, powerLimit);
+        if (rc == E_OK)
+        {
+            inverter->PowerLimit = powerLimit;
+            
+            // Calculate percentage based on inverter max power
+            // For SB 5000TL-21, max power is typically 5000W
+            // For SB 4000TL-21, max power is typically 4000W
+            float maxPower = 5000.0f; // Default assumption
+            
+            // Try to determine max power from inverter type
+            if (inverter->DeviceType.find("4000") != std::string::npos)
+                maxPower = 4000.0f;
+            else if (inverter->DeviceType.find("5000") != std::string::npos)
+                maxPower = 5000.0f;
+            
+            if (maxPower > 0)
+                inverter->PowerLimitPct = (float)powerLimit / maxPower * 100.0f;
+            else
+                inverter->PowerLimitPct = 0.0f;
+                
+            if (VERBOSE_NORMAL)
+                printf("Inverter %lu: Power Limit = %u W (%.1f%%)\n", 
+                       inverter->Serial, powerLimit, inverter->PowerLimitPct);
+        }
+        else
+        {
+            if (VERBOSE_NORMAL)
+                printf("Failed to get power limit for inverter %lu: %d\n", inverter->Serial, rc);
+            inverter->PowerLimit = 0;
+            inverter->PowerLimitPct = 0.0f;
+        }
+    }
+}
+
+void Inverter::processCommands()
+{
+    if (!m_mqtt_subscriber)
+        return;
+        
+    // Process all pending commands
+    while (m_mqtt_subscriber->hasCommands())
+    {
+        MqttCommand cmd = m_mqtt_subscriber->getNextCommand();
+        
+        if (cmd.command.empty())
+            continue;
+            
+        if (VERBOSE_NORMAL)
+            printf("Processing MQTT command: %s for inverter %s\n", 
+                   cmd.command.c_str(), cmd.inverter_serial.c_str());
+        
+        // Find the target inverter
+        InverterData* targetInverter = nullptr;
+        for (uint32_t inv = 0; m_inverters[inv] != NULL && inv < MAX_INVERTERS; inv++)
+        {
+            if (std::to_string(m_inverters[inv]->Serial) == cmd.inverter_serial)
+            {
+                targetInverter = m_inverters[inv];
+                break;
+            }
+        }
+        
+        if (!targetInverter)
+        {
+            std::string error_msg = "Inverter not found: " + cmd.inverter_serial;
+            m_mqtt_subscriber->publishResponse(cmd.inverter_serial, cmd.command_id, 
+                                             "error", error_msg);
+            continue;
+        }
+        
+        // Process command
+        if (cmd.command == "set_power_limit")
+        {
+            E_SBFSPOT rc = setPowerLimit(targetInverter, cmd.power_limit_watts);
+            if (rc == E_OK)
+            {
+                // Update the local power limit data
+                targetInverter->PowerLimit = cmd.power_limit_watts;
+                
+                // Calculate percentage
+                float maxPower = 5000.0f;
+                if (targetInverter->DeviceType.find("4000") != std::string::npos)
+                    maxPower = 4000.0f;
+                else if (targetInverter->DeviceType.find("5000") != std::string::npos)
+                    maxPower = 5000.0f;
+                
+                if (maxPower > 0)
+                    targetInverter->PowerLimitPct = (float)cmd.power_limit_watts / maxPower * 100.0f;
+                
+                std::string success_msg = "Power limit set to " + std::to_string(cmd.power_limit_watts) + " W";
+                m_mqtt_subscriber->publishResponse(cmd.inverter_serial, cmd.command_id, 
+                                                 "success", success_msg, cmd.power_limit_watts);
+                
+                if (VERBOSE_NORMAL)
+                    printf("Successfully set power limit to %u W for inverter %s\n", 
+                           cmd.power_limit_watts, cmd.inverter_serial.c_str());
+            }
+            else
+            {
+                std::string error_msg = "Failed to set power limit: error code " + std::to_string(rc);
+                m_mqtt_subscriber->publishResponse(cmd.inverter_serial, cmd.command_id, 
+                                                 "error", error_msg);
+                                                 
+                if (VERBOSE_NORMAL)
+                    printf("Failed to set power limit for inverter %s: %d\n", 
+                           cmd.inverter_serial.c_str(), rc);
+            }
+        }
+        else
+        {
+            std::string error_msg = "Unknown command: " + cmd.command;
+            m_mqtt_subscriber->publishResponse(cmd.inverter_serial, cmd.command_id, 
+                                             "error", error_msg);
+        }
+    }
 }
 

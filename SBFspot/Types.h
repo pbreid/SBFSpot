@@ -118,6 +118,11 @@ struct Config
     std::string mqtt_publish_data;  // comma delimited list of spot data to publish (Timestamp,Serial,MeteringDyWhOut,GridMsTotW,...)
     std::string mqtt_item_format;   // default "{key}": {value}
     std::string mqtt_item_delimiter;// default comma
+    std::string mqtt_command_topic; // default sbfspot_{serial}/commands
+    std::string mqtt_response_topic;// default sbfspot_{serial}/response
+    std::string mqtt_subscribe_exe; // default /usr/bin/mosquitto_sub
+    std::string mqtt_subscribe_args;// default arguments for mosquitto_sub
+    bool mqtt_commands_enabled;     // default false
 
     std::string decode_path;        // undocumented
 
@@ -294,6 +299,8 @@ struct InverterData
     int logonStatus;
     uint32_t multigateID;
     E_SBFSPOT status;                   // Result of getInverterData()
+    uint32_t PowerLimit;                // Current power limit in watts
+    float PowerLimitPct;                // Current power limit as percentage
 };
 
 //SMA Structs must be aligned on byte boundaries

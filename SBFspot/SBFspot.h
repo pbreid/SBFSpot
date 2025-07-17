@@ -106,6 +106,8 @@ void ShowConfig(Config *cfg);
 E_SBFSPOT getDeviceData(InverterData *inv, LriDef lri, uint16_t cmd, Rec40S32 &data);
 E_SBFSPOT setDeviceData(InverterData *inv, LriDef lri, uint16_t cmd, Rec40S32 &data);
 E_SBFSPOT getDeviceList(InverterData *devList[], int multigateID);
+E_SBFSPOT setPowerLimit(InverterData *inv, uint32_t powerLimitWatts);
+E_SBFSPOT getPowerLimit(InverterData *inv, uint32_t &currentPowerLimit);
 
 extern uint8_t CommBuf[COMMBUFSIZE];
 

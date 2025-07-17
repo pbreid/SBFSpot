@@ -36,10 +36,23 @@ DISCLAIMER:
 
 #include <vector>
 #include <string>
+#include <thread>
+#include <atomic>
+#include <mutex>
+#include <queue>
 #include "hash.h"
 
 struct Config;
 struct InverterData;
+
+struct MqttCommand
+{
+    std::string command;
+    std::string inverter_serial;
+    uint32_t power_limit_watts;
+    std::string command_id;
+    time_t timestamp;
+};
 
 class MqttExport
 {
@@ -54,4 +67,30 @@ private:
 
     std::string to_keyvalue(const std::string key, const std::string value) const;
     time_t to_time_t(float time_f);
+};
+
+class MqttCommandSubscriber
+{
+public:
+    MqttCommandSubscriber(const Config& config);
+    ~MqttCommandSubscriber();
+
+    int start();
+    void stop();
+    bool hasCommands() const;
+    MqttCommand getNextCommand();
+    void publishResponse(const std::string& inverter_serial, const std::string& command_id, 
+                        const std::string& status, const std::string& message, 
+                        uint32_t power_limit_set = 0);
+
+private:
+    const Config& m_config;
+    std::thread m_subscriber_thread;
+    std::atomic<bool> m_running;
+    std::queue<MqttCommand> m_command_queue;
+    mutable std::mutex m_queue_mutex;
+    
+    void subscribeLoop();
+    bool parseCommand(const std::string& message, MqttCommand& cmd);
+    void publishMessage(const std::string& topic, const std::string& message);
 };

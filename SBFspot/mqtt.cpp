@@ -37,6 +37,10 @@ DISCLAIMER:
 #include "SBFspot.h"
 #include <boost/algorithm/string.hpp>
 #include "mppt.h"
+#include <chrono>
+#include <sstream>
+#include <iostream>
+#include <cstdio>
 
 MqttExport::MqttExport(const Config& config)
     : m_config(config)
@@ -234,6 +238,12 @@ int MqttExport::exportInverterData(const std::vector<InverterData>& inverterData
             case "meteringwtot"_:
                 FormatFloat(value, (float)(inv.MeteringGridMsTotWIn - inv.MeteringGridMsTotWOut), 0, prec, dp);
                 break;
+            case "powerlimit"_:
+                FormatFloat(value, (float)inv.PowerLimit, 0, prec, dp);
+                break;
+            case "powerlimitpct"_:
+                FormatFloat(value, inv.PowerLimitPct, 0, prec, dp);
+                break;
             case "pdc"_:
                 for (const auto& dc : inv.mpp)
                 {
@@ -318,4 +328,218 @@ time_t MqttExport::to_time_t(float time_f)
     localtm->tm_hour = (int)time_f;
     localtm->tm_min = (int)((time_f - (int)time_f) * 60);
     return std::mktime(localtm);
+}
+
+// MQTT Command Subscriber Implementation
+MqttCommandSubscriber::MqttCommandSubscriber(const Config& config)
+    : m_config(config), m_running(false)
+{
+}
+
+MqttCommandSubscriber::~MqttCommandSubscriber()
+{
+    stop();
+}
+
+int MqttCommandSubscriber::start()
+{
+    if (!m_config.mqtt_commands_enabled)
+        return 0;
+
+    m_running = true;
+    m_subscriber_thread = std::thread(&MqttCommandSubscriber::subscribeLoop, this);
+    
+    if (VERBOSE_NORMAL) 
+        std::cout << "MQTT Command Subscriber started" << std::endl;
+    
+    return 0;
+}
+
+void MqttCommandSubscriber::stop()
+{
+    if (m_running)
+    {
+        m_running = false;
+        if (m_subscriber_thread.joinable())
+            m_subscriber_thread.join();
+        
+        if (VERBOSE_NORMAL) 
+            std::cout << "MQTT Command Subscriber stopped" << std::endl;
+    }
+}
+
+bool MqttCommandSubscriber::hasCommands() const
+{
+    std::lock_guard<std::mutex> lock(m_queue_mutex);
+    return !m_command_queue.empty();
+}
+
+MqttCommand MqttCommandSubscriber::getNextCommand()
+{
+    std::lock_guard<std::mutex> lock(m_queue_mutex);
+    if (m_command_queue.empty())
+        return MqttCommand{};
+    
+    MqttCommand cmd = m_command_queue.front();
+    m_command_queue.pop();
+    return cmd;
+}
+
+void MqttCommandSubscriber::subscribeLoop()
+{
+    std::string mqtt_command_line = m_config.mqtt_subscribe_exe + " " + m_config.mqtt_subscribe_args;
+    
+    // Replace placeholders in command line
+    boost::replace_first(mqtt_command_line, "{host}", m_config.mqtt_host);
+    boost::replace_first(mqtt_command_line, "{port}", m_config.mqtt_port);
+    boost::replace_first(mqtt_command_line, "{topic}", m_config.mqtt_command_topic);
+    
+    // For Bluetooth connections, add some connection stability optimizations
+    if (m_config.ConnectionType == CT_BLUETOOTH)
+    {
+        // Add keepalive for Bluetooth connections
+        mqtt_command_line += " -k 30";
+    }
+    
+    if (VERBOSE_NORMAL)
+        std::cout << "MQTT Subscribe Command: " << mqtt_command_line << std::endl;
+    
+    while (m_running)
+    {
+        FILE* pipe = popen(mqtt_command_line.c_str(), "r");
+        if (!pipe)
+        {
+            std::cerr << "Failed to start MQTT subscriber: " << mqtt_command_line << std::endl;
+            std::this_thread::sleep_for(std::chrono::seconds(5));
+            continue;
+        }
+        
+        char buffer[1024];
+        while (m_running && fgets(buffer, sizeof(buffer), pipe))
+        {
+            std::string message(buffer);
+            // Remove trailing newline
+            if (!message.empty() && message.back() == '\n')
+                message.pop_back();
+            
+            MqttCommand cmd;
+            if (parseCommand(message, cmd))
+            {
+                std::lock_guard<std::mutex> lock(m_queue_mutex);
+                m_command_queue.push(cmd);
+                
+                if (VERBOSE_NORMAL)
+                    std::cout << "MQTT Command received: " << cmd.command 
+                              << " for inverter " << cmd.inverter_serial << std::endl;
+            }
+        }
+        
+        pclose(pipe);
+        if (m_running)
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
+}
+
+bool MqttCommandSubscriber::parseCommand(const std::string& message, MqttCommand& cmd)
+{
+    try
+    {
+        // Simple JSON parsing for command format:
+        // {"command":"set_power_limit","inverter_serial":"12345678","power_limit_watts":3000,"command_id":"123"}
+        
+        size_t cmd_pos = message.find("\"command\":");
+        size_t serial_pos = message.find("\"inverter_serial\":");
+        size_t power_pos = message.find("\"power_limit_watts\":");
+        size_t id_pos = message.find("\"command_id\":");
+        
+        if (cmd_pos == std::string::npos || serial_pos == std::string::npos)
+            return false;
+        
+        // Extract command
+        size_t cmd_start = message.find("\"", cmd_pos + 10) + 1;
+        size_t cmd_end = message.find("\"", cmd_start);
+        if (cmd_start == std::string::npos || cmd_end == std::string::npos)
+            return false;
+        cmd.command = message.substr(cmd_start, cmd_end - cmd_start);
+        
+        // Extract inverter serial
+        size_t serial_start = message.find("\"", serial_pos + 18) + 1;
+        size_t serial_end = message.find("\"", serial_start);
+        if (serial_start == std::string::npos || serial_end == std::string::npos)
+            return false;
+        cmd.inverter_serial = message.substr(serial_start, serial_end - serial_start);
+        
+        // Extract power limit for set_power_limit command
+        if (cmd.command == "set_power_limit" && power_pos != std::string::npos)
+        {
+            size_t power_start = message.find(":", power_pos + 20) + 1;
+            size_t power_end = message.find_first_of(",}", power_start);
+            if (power_start != std::string::npos && power_end != std::string::npos)
+            {
+                std::string power_str = message.substr(power_start, power_end - power_start);
+                cmd.power_limit_watts = std::stoul(power_str);
+            }
+        }
+        
+        // Extract command ID (optional)
+        if (id_pos != std::string::npos)
+        {
+            size_t id_start = message.find("\"", id_pos + 13) + 1;
+            size_t id_end = message.find("\"", id_start);
+            if (id_start != std::string::npos && id_end != std::string::npos)
+                cmd.command_id = message.substr(id_start, id_end - id_start);
+        }
+        
+        cmd.timestamp = time(nullptr);
+        return true;
+    }
+    catch (const std::exception& e)
+    {
+        std::cerr << "Error parsing MQTT command: " << e.what() << std::endl;
+        return false;
+    }
+}
+
+void MqttCommandSubscriber::publishResponse(const std::string& inverter_serial, 
+                                           const std::string& command_id,
+                                           const std::string& status, 
+                                           const std::string& message,
+                                           uint32_t power_limit_set)
+{
+    std::string response_topic = m_config.mqtt_response_topic;
+    boost::replace_first(response_topic, "{serial}", inverter_serial);
+    
+    std::stringstream response_json;
+    response_json << "{";
+    response_json << "\"timestamp\":\"" << strftime_t(m_config.DateTimeFormat, time(nullptr)) << "\",";
+    response_json << "\"inverter_serial\":\"" << inverter_serial << "\",";
+    if (!command_id.empty())
+        response_json << "\"command_id\":\"" << command_id << "\",";
+    response_json << "\"status\":\"" << status << "\",";
+    response_json << "\"message\":\"" << message << "\"";
+    if (power_limit_set > 0)
+        response_json << ",\"power_limit_set\":" << power_limit_set;
+    response_json << "}";
+    
+    publishMessage(response_topic, response_json.str());
+}
+
+void MqttCommandSubscriber::publishMessage(const std::string& topic, const std::string& message)
+{
+    std::string mqtt_command_line = m_config.mqtt_publish_exe + " " + m_config.mqtt_publish_args;
+    
+    // Replace placeholders
+    boost::replace_first(mqtt_command_line, "{host}", m_config.mqtt_host);
+    boost::replace_first(mqtt_command_line, "{port}", m_config.mqtt_port);
+    boost::replace_first(mqtt_command_line, "{topic}", topic);
+    boost::replace_first(mqtt_command_line, "{message}", message);
+    
+    if (VERBOSE_NORMAL)
+        std::cout << "MQTT Response: " << message << std::endl;
+    
+    int system_rc = ::system(mqtt_command_line.c_str());
+    if (system_rc != 0)
+    {
+        std::cerr << "Failed to publish MQTT response: " << mqtt_command_line << std::endl;
+    }
 }

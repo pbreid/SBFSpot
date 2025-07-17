@@ -50,6 +50,8 @@ DISCLAIMER:
 #include "osselect.h"
 #include "endianness.h"
 #include "SBFspot.h"
+#include <chrono>
+#include <thread>
 #include "misc.h"
 #include <stdio.h>
 #include <string.h>
@@ -1625,6 +1627,13 @@ int GetConfig(Config *cfg, bool isInclude)
         cfg->sunrise = 0;
         cfg->sunset = 0;
         cfg->isLight = false;
+        
+        // Initialize MQTT command defaults
+        cfg->mqtt_commands_enabled = false;
+        cfg->mqtt_subscribe_exe = "/usr/bin/mosquitto_sub";
+        cfg->mqtt_command_topic = "sbfspot_{serial}/commands";
+        cfg->mqtt_response_topic = "sbfspot_{serial}/response";
+        cfg->mqtt_subscribe_args = "-h {host} -p {port} -t {topic} -v";
     }
 
     const char *CFG_Boolean = "(0-1)";
@@ -1987,6 +1996,16 @@ int GetConfig(Config *cfg, bool isInclude)
                     cfg->mqtt_item_format = value;
                 else if (stricmp(key, "MQTT_Data") == 0)
                     cfg->mqtt_publish_data = value;
+                else if (stricmp(key, "MQTT_Commands") == 0)
+                    cfg->mqtt_commands_enabled = (atoi(value) != 0);
+                else if (stricmp(key, "MQTT_Subscribe") == 0)
+                    cfg->mqtt_subscribe_exe = value;
+                else if (stricmp(key, "MQTT_CommandTopic") == 0)
+                    cfg->mqtt_command_topic = value;
+                else if (stricmp(key, "MQTT_ResponseTopic") == 0)
+                    cfg->mqtt_response_topic = value;
+                else if (stricmp(key, "MQTT_SubscriberArgs") == 0)
+                    cfg->mqtt_subscribe_args = value;
                 else if (stricmp(key, "MQTT_ItemDelimiter") == 0)
                 {
                     if (stricmp(value, "comma") == 0)
@@ -2181,7 +2200,12 @@ void ShowConfig(Config *cfg)
             "\nMQTT_Publisher=" << cfg->mqtt_publish_exe << \
             "\nMQTT_PublisherArgs=" << cfg->mqtt_publish_args << \
             "\nMQTT_Data=" << cfg->mqtt_publish_data << \
-            "\nMQTT_ItemFormat=" << cfg->mqtt_item_format;
+            "\nMQTT_ItemFormat=" << cfg->mqtt_item_format << \
+            "\nMQTT_Commands=" << cfg->mqtt_commands_enabled << \
+            "\nMQTT_Subscribe=" << cfg->mqtt_subscribe_exe << \
+            "\nMQTT_CommandTopic=" << cfg->mqtt_command_topic << \
+            "\nMQTT_ResponseTopic=" << cfg->mqtt_response_topic << \
+            "\nMQTT_SubscriberArgs=" << cfg->mqtt_subscribe_args;
     }
 
     std::cout << "\nEnd of Config\n" << std::endl;
@@ -3235,4 +3259,107 @@ E_SBFSPOT logoffMultigateDevices(InverterData* const inverters[])
     }
 
     return E_OK;
+}
+
+E_SBFSPOT setPowerLimit(InverterData *inv, uint32_t powerLimitWatts)
+{
+    if (DEBUG_NORMAL) printf("setPowerLimit(%d) for inverter %lu\n", powerLimitWatts, inv->Serial);
+    
+    E_SBFSPOT rc = E_OK;
+    
+    // For Bluetooth connections, add small delay to ensure connection stability
+    if (ConnType == CT_BLUETOOTH)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    
+    // First, get current power limit settings to preserve existing values
+    Rec40S32 currentData;
+    rc = getDeviceData(inv, InverterWLim, 0x010E, currentData);
+    if (rc != E_OK)
+    {
+        if (DEBUG_NORMAL) printf("Failed to get current power limit: %d\n", rc);
+        return rc;
+    }
+    
+    // Create new data structure with updated power limit
+    Rec40S32 newData;
+    newData.LRI(InverterWLim);
+    newData.DateTime(time(nullptr));
+    newData.MinLL(currentData.MinLL());         // Keep current minimum
+    newData.MaxLL(currentData.MaxLL());         // Keep current maximum
+    newData.MinUL(currentData.MinUL());         // Keep current upper minimum
+    newData.MaxUL(currentData.MaxUL());         // Keep current upper maximum
+    newData.MinActual(powerLimitWatts);         // Set new power limit
+    newData.MaxActual(powerLimitWatts);         // Set new power limit
+    newData.Res1(0);
+    newData.Res2(0);
+    
+    // Validate power limit is within acceptable range
+    if (newData.MinUL() > 0 && powerLimitWatts > (uint32_t)newData.MinUL())
+    {
+        if (DEBUG_NORMAL) printf("Power limit %d exceeds maximum allowed %d\n", powerLimitWatts, newData.MinUL());
+        return E_ARCHNODATA;
+    }
+    
+    if (newData.MinLL() > 0 && powerLimitWatts < (uint32_t)newData.MinLL())
+    {
+        if (DEBUG_NORMAL) printf("Power limit %d below minimum allowed %d\n", powerLimitWatts, newData.MinLL());
+        return E_ARCHNODATA;
+    }
+    
+    // Set the power limit with retry logic for Bluetooth connections
+    int retryCount = 0;
+    const int maxRetries = (ConnType == CT_BLUETOOTH) ? 3 : 1;
+    
+    do {
+        rc = setDeviceData(inv, InverterWLim, 0x010E, newData);
+        if (rc == E_OK) break;
+        
+        retryCount++;
+        if (retryCount < maxRetries)
+        {
+            if (DEBUG_NORMAL) printf("Power limit command failed (attempt %d), retrying...\n", retryCount);
+            if (ConnType == CT_BLUETOOTH)
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        }
+    } while (retryCount < maxRetries);
+    
+    if (rc != E_OK)
+    {
+        if (DEBUG_NORMAL) printf("Failed to set power limit after %d attempts: %d\n", retryCount, rc);
+        return rc;
+    }
+    
+    // Verify the setting was applied
+    Rec40S32 verifyData;
+    rc = getDeviceData(inv, InverterWLim, 0x010E, verifyData);
+    if (rc == E_OK)
+    {
+        if (DEBUG_NORMAL) printf("Power limit set successfully: %d W\n", verifyData.ActualPowerLimit());
+    }
+    
+    return rc;
+}
+
+E_SBFSPOT getPowerLimit(InverterData *inv, uint32_t &currentPowerLimit)
+{
+    if (DEBUG_NORMAL) puts("getPowerLimit()");
+    
+    E_SBFSPOT rc = E_OK;
+    Rec40S32 data;
+    
+    rc = getDeviceData(inv, InverterWLim, 0x010E, data);
+    if (rc == E_OK)
+    {
+        currentPowerLimit = data.ActualPowerLimit();
+        if (DEBUG_NORMAL) printf("Current power limit: %d W\n", currentPowerLimit);
+    }
+    else
+    {
+        if (DEBUG_NORMAL) printf("Failed to get power limit: %d\n", rc);
+        currentPowerLimit = 0;
+    }
+    
+    return rc;
 }

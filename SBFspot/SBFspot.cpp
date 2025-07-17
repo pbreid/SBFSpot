@@ -3344,7 +3344,7 @@ E_SBFSPOT setPowerLimit(InverterData *inv, uint32_t powerLimitWatts)
 
 E_SBFSPOT getPowerLimit(InverterData *inv, uint32_t &currentPowerLimit)
 {
-    if (DEBUG_NORMAL) puts("getPowerLimit()");
+    if (DEBUG_NORMAL) printf("getPowerLimit() - Starting power limit detection for inverter %lu\n", inv->Serial);
     
     E_SBFSPOT rc = E_OK;
     Rec40S32 data;
